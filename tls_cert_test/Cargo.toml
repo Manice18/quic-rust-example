@@ -1,0 +1,9 @@
+[package]
+name = "tls_cert_test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rcgen = "0.13.2"
+rustls = {workspace = true}

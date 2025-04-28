@@ -1,0 +1,17 @@
+[workspace]
+members = ["quic_server","quic_client","tls_cert_test"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+name = "quic_example"
+description = "A simple example of a QUIC server and client using Rust"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+quinn = "0.10"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+rustls = "0.21"
