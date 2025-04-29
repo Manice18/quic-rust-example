@@ -1,74 +1,78 @@
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::sync::Arc;
+use anyhow::Result;
+use quinn::{Endpoint, ServerConfig};
+use std::net::SocketAddr;
+use tracing::{error, info};
+use tracing_subscriber;
 
-fn make_self_signed_cert(
-) -> Result<(rustls::Certificate, rustls::PrivateKey), Box<dyn std::error::Error>> {
-    let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+const PORT: u16 = 4433;
+const ADDRESS: &str = "127.0.0.1";
 
-    let cert_der = certified_key.cert.der().to_vec();
-    let key_der = certified_key.key_pair.serialize_der();
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt::init();
 
-    let key = rustls::PrivateKey(key_der);
-    let cert = rustls::Certificate(cert_der);
+    let (cert, key) = quic_server::make_self_signed_cert().unwrap();
+    let server_config = ServerConfig::with_single_cert(vec![cert], key).unwrap();
 
-    Ok((cert, key))
+    let addr = format!("{}:{}", ADDRESS, PORT)
+        .parse::<SocketAddr>()
+        .unwrap();
+
+    let endpoint = Endpoint::server(server_config, addr).unwrap();
+
+    info!("QUIC server listening on {}", addr);
+
+    while let Some(conn) = endpoint.accept().await {
+        tokio::spawn(handle_connection(conn));
+    }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Generate self-signed certificate
-    let (cert, key) = make_self_signed_cert()?;
-    println!("Generated self-signed certificate!");
+async fn handle_connection(conn: quinn::Connecting) -> Result<()> {
+    let connection = match conn.await {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Connection failed: {}", e);
+            return Ok(());
+        }
+    };
 
-    // Set up server config
-    let server_config = rustls::ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert.clone()], key)?;
-    let server_config = Arc::new(server_config);
+    info!("New connection established!{}", connection.remote_address());
 
-    // Start listening
-    let listener = TcpListener::bind("127.0.0.1:8443")?;
-    println!("Server listening on 127.0.0.1:8443");
+    loop {
+        let stream_result = connection.accept_bi().await;
+        match stream_result {
+            Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                info!("Connection closed!");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+            Ok((mut send, mut recv)) => {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 1024];
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(tcp_stream) => {
-                let server_config = server_config.clone();
+                    match recv.read(&mut buf).await {
+                        Ok(n) => {
+                            if n == Some(0) {
+                                return;
+                            }
+                            let received = &buf[..n.unwrap()];
+                            info!("Received: {:?}", String::from_utf8_lossy(received));
 
-                std::thread::spawn(move || {
-                    let mut tls_stream = rustls::ServerConnection::new(server_config)
-                        .map(|conn| rustls::StreamOwned::new(conn, tcp_stream))
-                        .expect("Failed to create TLS stream");
-
-                    println!("Accepted new TLS connection!");
-
-                    let mut buffer = [0u8; 1024];
-                    match tls_stream.read(&mut buffer) {
-                        Ok(count) => {
-                            println!("Read {} bytes from client", count);
-                            if count > 0 {
-                                match std::str::from_utf8(&buffer[..count]) {
-                                    Ok(text) => println!("Client said: {}", text),
-                                    Err(_) => println!(
-                                        "Client sent non-UTF8 data: {:?}",
-                                        &buffer[..count]
-                                    ),
-                                }
-                                let _ = tls_stream.write_all(&buffer[..count]);
+                            // Echo back
+                            if let Err(e) = send.write_all(b"Hello from server").await {
+                                error!("Failed to send: {e}");
                             }
                         }
                         Err(e) => {
-                            println!("Error reading from TLS stream: {:?}", e);
+                            error!("Error reading from stream: {}", e);
+                            info!("Client connection closed due to error");
+                            return;
                         }
                     }
                 });
             }
-            Err(e) => {
-                println!("Connection failed: {:?}", e);
-            }
         }
     }
-
-    Ok(())
 }
